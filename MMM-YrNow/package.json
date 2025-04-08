@@ -1,0 +1,9 @@
+{
+    "name": "mmm-yrnow",
+    "version": "1.0.0",
+    "description": "Dependencies for MMM-YrNow module",
+    "private": true,
+    "dependencies": {
+      "request": "^2.88.2"
+    }
+  }
