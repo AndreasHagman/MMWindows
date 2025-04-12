@@ -240,11 +240,13 @@ Module.register("MMM-Strava-Last-Activity-Map", {
 
             map.fitBounds(bounds);
 
-            // Optional: Adjust zoom slightly after fitBounds if needed
+            // Adjust zoom x steps after fitBounds completes
             google.maps.event.addListenerOnce(map, "bounds_changed", () => {
-                if (map.getZoom() > 15) { // Example: Don't zoom in too much
-                    map.setZoom(15);
-                }
+                // Get the zoom level that fitBounds calculated
+                const currentZoom = map.getZoom();
+                // Set the zoom level to the chosen step (higher number is closer zoom)
+                Log.info(`${this.name}: fitBounds zoom: ${currentZoom}. Setting zoom to ${currentZoom + this.config.zoom}.`);
+                map.setZoom(currentZoom + this.config.zoom);
             });
         } catch (error) {
             Log.error(this.name + ": Error initializing Google Map:", error);
