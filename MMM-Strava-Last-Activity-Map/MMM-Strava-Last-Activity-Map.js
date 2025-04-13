@@ -329,10 +329,9 @@ Module.register("MMM-Strava-Last-Activity-Map", {
                 this.loading = false; // Ensure loading state is false
                 this.accessTokenError = {}; // Clear errors
                 // No need to call updateDom unless text info HAS to refresh minor details
-                // this.updateDom(); // Uncomment if you want text to refresh even if ID is same
+                this.updateDom(); // Uncomment if you want text to refresh even if ID is same
                 return; // <<< Important: Stop processing further map logic
             }
-
 
             // --- New or Different Activity Data Received ---
             Log.info(`${this.name}: New activity data received (ID: ${payload.id}). Processing.`);
