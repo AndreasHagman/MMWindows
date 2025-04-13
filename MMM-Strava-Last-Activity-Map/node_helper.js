@@ -53,10 +53,16 @@ processData (data) {
         latitude = null,
         longitude = null,
         summaryPolyLine = null;
+        formattedPace = null;
+        activityId = null;
 
     if (Array.isArray(data) && data.length > 0) {
         this.sendSocketNotification("LOG", `Processing activity data. Count: ${data.length}`);
         const activity = data[0];
+
+        // --- Extract ID inside the block where activity is defined ---
+        activityId = activity.id || null; // Assign the ID if activity exists
+
 
         // Basic Info
         name = activity.name;
@@ -66,24 +72,48 @@ processData (data) {
         const year = date.getUTCFullYear();
         activityDate = `${month}/${day}/${year}`;
 
-        // --- Distance Calculation (Meters to Kilometers) ---
+        // --- CORRECTED Distance Calculation ---
+        // Declare distanceInMeters here with a default value
+        let distanceInMeters = 0;
         if (typeof activity.distance === 'number') {
-            // Convert meters to kilometers and format to 1 decimal place
-            distance = (activity.distance / 1000).toFixed(1);
+            distanceInMeters = activity.distance; // Assign the actual value
+            distance = (distanceInMeters / 1000).toFixed(1); // Formatted km string for display
         } else {
              this.sendSocketNotification("LOG", `Notice: Activity '${activity.name}' lacks distance data.`);
         }
         // --- End Distance Calculation ---
 
 
-        // Time Calculation
+        // --- CORRECTED Time Calculation ---
+        // Declare movingTimeInSeconds here with a default value
+        let movingTimeInSeconds = 0;
         if (typeof activity.moving_time === 'number') {
-            const totalMinutes = Math.floor(activity.moving_time / 60);
-            minutes = totalMinutes % 60;
-            hours = Math.floor(totalMinutes / 60);
+            movingTimeInSeconds = activity.moving_time; // Assign the actual value
+            const totalMinutes = Math.floor(movingTimeInSeconds / 60);
+            minutes = totalMinutes % 60; // Assign to outer scope variable
+            hours = Math.floor(totalMinutes / 60);   // Assign to outer scope variable
         } else {
              this.sendSocketNotification("LOG", `Notice: Activity '${activity.name}' lacks moving time data.`);
         }
+        // --- End Time Calculation ---
+
+        // --- Pace Calculation (Time per Kilometer) ---
+        // Check if we have valid distance and time, and if it's a relevant sport type (like Walk, Run)
+        const isPaceRelevant = ['Run', 'Walk', 'Hike'].includes(activity.type);
+        if (isPaceRelevant && distanceInMeters > 0 && movingTimeInSeconds > 0) {
+            const distanceInKm = distanceInMeters / 1000;
+            const paceInSecondsPerKm = movingTimeInSeconds / distanceInKm;
+            const paceMinutes = Math.floor(paceInSecondsPerKm / 60);
+            const paceSeconds = Math.round(paceInSecondsPerKm % 60);
+            const formattedSeconds = String(paceSeconds).padStart(2, '0');
+            formattedPace = `${paceMinutes}:${formattedSeconds}`;
+            this.sendSocketNotification("LOG", `Calculated Pace: ${formattedPace}`);
+        } else if (distanceInMeters <= 0 || movingTimeInSeconds <= 0) {
+             this.sendSocketNotification("LOG", "Could not calculate pace due to zero distance or time.");
+        } else {
+             this.sendSocketNotification("LOG", `Pace calculation not relevant for activity type: ${activity.type}`);
+        }
+        // --- End Pace Calculation ---
 
         // --- Map Data Handling ---
         // (Keep the existing logic for latitude, longitude, summaryPolyLine here)
@@ -111,6 +141,7 @@ processData (data) {
 
     // Return the processed data object
     return {
+        id: activityId,
         name,
         activityDate,
         distance, // This now holds the distance in km (as a string from toFixed)
@@ -118,7 +149,8 @@ processData (data) {
         hours,
         latitude,
         longitude,
-        summaryPolyLine
+        summaryPolyLine,
+        formattedPace
     };
 },
 
@@ -200,6 +232,10 @@ async getStravaData (payload) {
                 Authorization: `Bearer ${this.accessTokenData.access_token}`
             }
         });
+
+        // --- ADD THIS LOGGING LINE ---
+        this.sendSocketNotification("LOG", `Raw Strava API Response Data:\n${JSON.stringify(response.data, null, 2)}`);
+        // --- END OF ADDED LINE ---
 
         const processedData = this.processData(response.data);
         this.sendSocketNotification("STRAVA_DATA_RESULT", processedData);
