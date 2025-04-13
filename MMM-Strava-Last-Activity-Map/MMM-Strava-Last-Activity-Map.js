@@ -15,6 +15,7 @@
 /* global google */
 
 Module.register("MMM-Strava-Last-Activity-Map", {
+    currentActivityId: null, // Store the ID of the activity currently displayed
 	// --- Existing variables ---
 	baseUrl: "https://www.strava.com/api/v3/",
 	tokenUrl: "https://www.strava.com/oauth/token?",
@@ -25,14 +26,14 @@ Module.register("MMM-Strava-Last-Activity-Map", {
 
 	// --- Existing config defaults ---
 	defaults: {
-		zoom: 10,
+		zoom: 1,
 		mapTypeId: "roadmap",
 		styledMapType: "standard", // Note: 'styles' property expects an array, not a string name
 		disableDefaultUI: true,
 		header: "Last Activity on Strava",
 		initialLoadDelay: 2500,
 		retryDelay: 2500,
-		updateInterval: 60 * 10 * 1000, // Increased default interval slightly
+		updateInterval: 60 * 15 * 1000, // Increased default interval slightly
 		width: "250px",
 		height: "250px",
 		googleMapsApiKey: "" // Make sure API Key is set in config.js
@@ -49,6 +50,7 @@ Module.register("MMM-Strava-Last-Activity-Map", {
 		Log.info(`Starting module: ${this.name}`);
 		// No need to log start message here, node_helper does it.
 
+        this.currentActivityId = null; // Reset on start
 		this.apiData = null; // Reset data
 		this.loading = true;
         this.mapsApiLoaded = false; // Reset flag on start
@@ -172,12 +174,20 @@ Module.register("MMM-Strava-Last-Activity-Map", {
              <p>
                 ${(this.apiData.distance !== null && this.apiData.distance !== undefined) ? `<span class="value">${this.apiData.distance}</span> km` : ""}
                 ${(typeof this.apiData.hours === 'number' && typeof this.apiData.minutes === 'number') ? ` / <span class="value">${this.apiData.hours}</span>h <span class="value">${this.apiData.minutes}</span>m` : ""}
+                ${(this.apiData.formattedPace) ? ` / <span class="pace value">${this.apiData.formattedPace}</span></span> /km<span class="value">` : ""}
              </p>
         `;
 		wrapper.appendChild(detailsWrapper2);
 
 		return wrapper;
 	}, // End of getDom function
+
+    shouldDisplayMap: function(data) {
+        if (!data || data.error) return false;
+        return !!data.summaryPolyLine &&
+               typeof data.latitude === 'number' &&
+               typeof data.longitude === 'number';
+    },
 
     // --- Modified initializeMap to use unique ID and check google object ---
 	initializeMap () {
@@ -240,14 +250,15 @@ Module.register("MMM-Strava-Last-Activity-Map", {
 
             map.fitBounds(bounds);
 
-            // Adjust zoom x steps after fitBounds completes
+            // Adjust zoom ONE STEP after fitBounds completes
             google.maps.event.addListenerOnce(map, "bounds_changed", () => {
                 // Get the zoom level that fitBounds calculated
                 const currentZoom = map.getZoom();
-                // Set the zoom level to the chosen step (higher number is closer zoom)
+                // Set the zoom level to one step tighter (higher number)
                 Log.info(`${this.name}: fitBounds zoom: ${currentZoom}. Setting zoom to ${currentZoom + this.config.zoom}.`);
                 map.setZoom(currentZoom + this.config.zoom);
             });
+
         } catch (error) {
             Log.error(this.name + ": Error initializing Google Map:", error);
             mapElement.innerHTML = "Error loading map."; // Show error inside map div
@@ -298,89 +309,123 @@ Module.register("MMM-Strava-Last-Activity-Map", {
         }
 		if (notification === "STRAVA_DATA_RESULT") {
             Log.info(this.name + ": Strava data received.");
-            this.apiData = payload; // Store the received data (could be null/empty)
-            this.loading = false; // Data fetch attempt complete
-            this.accessTokenError = {}; // Clear any previous token error on successful fetch
 
-			// --- Conditionally load Google Maps script ---
-            // Only load if polyline exists AND the script hasn't been loaded yet
-            if (this.apiData && this.apiData.summaryPolyLine && !this.mapsApiLoaded) {
-                 this.loadGoogleMapsScript();
+            // --- Check if data is valid and has an ID ---
+            if (!payload || payload.error || !payload.id) {
+                Log.warn(`${this.name}: Received invalid, incomplete, or error payload.`, payload);
+                this.apiData = payload || { error: "Invalid data received." }; // Store error or payload
+                this.currentActivityId = null; // Clear activity ID
+                this.loading = false;
+                this.updateDom();
+                return; // Stop processing
             }
 
-			this.updateDom(); // Update display with new data/state
+            // --- Compare with current activity ID ---
+            // Check if the new ID is the same as the one we already processed/displayed
+            if (this.currentActivityId !== null && this.currentActivityId === payload.id) {
+                Log.info(`${this.name}: Received data for the same activity ID (${payload.id}). Skipping map reload/update.`);
+                // Optional: Update apiData if minor things like kudos could change, but often not needed
+                this.apiData = payload;
+                this.loading = false; // Ensure loading state is false
+                this.accessTokenError = {}; // Clear errors
+                // No need to call updateDom unless text info HAS to refresh minor details
+                // this.updateDom(); // Uncomment if you want text to refresh even if ID is same
+                return; // <<< Important: Stop processing further map logic
+            }
+
+
+            // --- New or Different Activity Data Received ---
+            Log.info(`${this.name}: New activity data received (ID: ${payload.id}). Processing.`);
+            this.apiData = payload; // Store the new data
+            this.currentActivityId = payload.id; // << Store the new ID
+            this.loading = false;
+            this.accessTokenError = {};
+
+            // Decide whether to display map based on NEW data
+            if (this.shouldDisplayMap(this.apiData)) {
+                // Polyline exists, display map
+                if (!this.mapsApiLoaded) {
+                    // Need to load the Google Maps script first
+                     Log.info(`${this.name}: Map data present, Google Maps API not loaded yet. Requesting script.`);
+                    this.loadGoogleMapsScript(); // Load script (only runs once)
+                    // Map will be initialized via the callback -> updateDom -> initializeMap sequence
+                } else {
+                    // Maps API is already loaded, proceed to load/update the map content directly
+                    Log.info(`${this.name}: Map data present, Google Maps API loaded. Initializing/Updating map.`);
+                    this.loadMap(); // Call the function to handle map init/update
+                }
+            } else {
+                // New data arrived, but it has no map data (or shouldn't display map)
+                Log.info(`${this.name}: No map data for this new activity (ID: ${payload.id}). Hiding map container if present.`);
+                // Clear internal map references if switching from map -> no map
+                this.map = null;
+                this.poly = null;
+                // The getDom function will handle showing the "No Map Data" message
+                this.updateDom(); // Update DOM to hide map div and show message
+            }
+
+            // We only call updateDom here if we didn't call loadMap() directly
+            // because loadMap() implicitly updates content, and the callback path also calls updateDom.
+            // However, calling it again is usually harmless.
+            // Let's ensure it's called if we are handling the "no map data" case above.
+            // this.updateDom(); // Call moved inside the 'else' block for no-map case
+
 		}
-	},
+	}, // End of socketNotificationReceived
 
     // In MMM-Strava-Last-Activity-Map.js
 
 // In MMM-Strava-Last-Activity-Map.js
 
-// --- Modified loadGoogleMapsScript with SIMPLIFIED callback name ---
+// --- Modified loadGoogleMapsScript with SIMPLIFIED callback name AND REMOVED DEFER ---
 loadGoogleMapsScript () {
     if (this.config.googleMapsApiKey === "") {
         Log.error(`${this.name}: Google Maps API key not set!`);
-        return; // Don't proceed if key is missing
+        return;
     }
 
-    const scriptId = "googleMapsScript_" + this.identifier; // Keep ID for checking if exists
+    const scriptId = "googleMapsScript_" + this.identifier;
     if (this.mapsApiLoaded || document.getElementById(scriptId)) {
         return;
     }
 
     Log.info(`${this.name}: Loading Google Maps API script.`);
 
-    // --- Define a SIMPLE, STATIC callback function name ---
-    const staticCallbackName = "MMMStravaMapsApiLoadedCallback"; // Simple static name
+    const staticCallbackName = "MMMStravaMapsApiLoadedCallback";
     window[staticCallbackName] = () => {
         Log.info(`${this.name}: Google Maps API script loaded successfully via callback: ${staticCallbackName}`);
-        // *** Important: We need 'this' to refer to the Module instance ***
-        // We need to find the correct module instance inside the global callback
-        // This is tricky. A common pattern is to store instances.
-        // Let's try a simpler approach first - assume 'this' somehow works (might not)
-        // A better way is needed if 'this' is undefined here.
-        // For now, let's see if the ReferenceError goes away.
         try {
             this.mapsApiLoaded = true;
-             // Update the DOM now that the API is ready, which might trigger map initialization
              setTimeout(() => this.updateDom(), 0);
         } catch(e) {
-             // Log an error if 'this' is not the module instance here
              console.error("ERROR: 'this' context lost in Google Maps callback for " + this.name + ". Map might not load.", e);
-             // You might need to find the module instance differently, e.g., through MM.getModules()
-             // Example (may need adjustment based on MM version):
-             /*
-             const moduleInstance = MM.getModules().find(m => m.identifier === this.identifier); // Requires this.identifier to be accessible, which it might not be here
+             // Attempt to find module instance if 'this' is lost
+             const moduleInstance = MM.getModules().withClass(this.name).find(m => m.identifier === this.identifier);
              if (moduleInstance) {
-                 moduleInstance.mapsApiLoaded = true;
-                 setTimeout(() => moduleInstance.updateDom(), 0);
+                  Log.info(`Found module instance for ${this.identifier} in callback.`);
+                  moduleInstance.mapsApiLoaded = true;
+                  setTimeout(() => moduleInstance.updateDom(), 0);
              } else {
-                  console.error("Could not find module instance in callback for " + this.identifier);
+                  Log.error(`Could not find module instance in callback for ${this.identifier}`);
              }
-             */
         }
     };
-     // Log right after definition to see if it exists on window
-     Log.info(`Callback ${staticCallbackName} defined on window: ${typeof window[staticCallbackName]}`);
-    // --- END Define the callback function FIRST ---
+    Log.info(`Callback ${staticCallbackName} defined on window: ${typeof window[staticCallbackName]}`);
 
-    // --- Now create and append the script tag ---
     const googleMapsScript = document.createElement("script");
     googleMapsScript.id = scriptId;
     googleMapsScript.type = "text/javascript";
-    // Use the STATIC callback name in the URL
     googleMapsScript.src = `https://maps.googleapis.com/maps/api/js?key=${this.config.googleMapsApiKey}&libraries=geometry&callback=${staticCallbackName}`;
-    googleMapsScript.async = true; // Use async, defer less critical here
-    // googleMapsScript.defer = true; // Remove defer for simplicity
+    googleMapsScript.async = true; // Keep async=true
+    // googleMapsScript.defer = true; // REMOVE or comment out this line
 
     document.head.appendChild(googleMapsScript);
 
     googleMapsScript.onerror = () => {
         Log.error(`${this.name}: Failed to load Google Maps script! Check API key, network, and browser console.`);
-        delete window[staticCallbackName]; // Clean up failed callback
+        delete window[staticCallbackName];
     };
-    // --- END Now create and append the script tag ---
-},
+}, // End of loadGoogleMapsScript
 
     // --- Existing getStyles ---
 	getStyles () {
