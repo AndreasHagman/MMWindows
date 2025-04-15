@@ -1,241 +1,304 @@
+/* MagicMirror² Node Helper: MMM-Strava-Last-Activity-Map */
+/* Multi-instance support using axios, cleaned-up version */
+
 const path = require("node:path");
 const fs = require("node:fs");
-// const { Console } = require("node:console"); // Likely not needed
 const NodeHelper = require("node_helper");
 const axios = require("axios");
-const Log = require("logger"); // Ensure 'logger' is correct, might need adjustment based on core MM logging
 
 module.exports = NodeHelper.create({
-	accessTokenData: {},
+    // --- Instance Storage ---
+    instances: {},
 
+    // --- Standard Methods ---
 	start () {
-		console.log(`Starting node_helper for: ${this.name}`);
-		// Memory usage interval (optional)
-		// setInterval(() => {
-		// 	const memoryUsage = process.memoryUsage();
-		// 	this.sendSocketNotification("LOG", `memory usage: ${JSON.stringify(memoryUsage)}`);
-		// }, 60000); // Check less frequently
+		this.log("Starting node_helper...");
 	},
 
-	async getAccessToken (payload) {
-		try {
-			const url = `${payload.tokenUrl}client_id=${payload.clientId}&client_secret=${payload.clientSecret}&refresh_token=${payload.refreshToken}&grant_type=refresh_token`;
-			const response = await axios.post(url);
-			const filePath = path.join(__dirname, "..", "strava_access_token.json");
-			try {
-				fs.writeFileSync(filePath, JSON.stringify(response.data));
-			} catch (error) {
-				this.sendSocketNotification("LOG", `Error writing token file: ${error}`);
-			}
-			this.accessTokenData = response.data;
-		} catch (error) {
-			this.sendSocketNotification("LOG", `Error fetching access token: ${error}`);
-            // Send error message or simple object
-			this.sendSocketNotification("ACCESS_TOKEN_ERROR", { message: error.message || "Failed to fetch token"});
-		}
-	},
-
-    // --- Updated processData ---
-    processData (data, unitsConfig) { // Accept unitsConfig
-        let name = null,
-            activityDate = null,
-            distance = null, // Holds formatted distance number string
-            distanceUnits = (unitsConfig === "imperial") ? "mi" : "km", // Set units label based on config
-            minutes = null,
-            hours = null,
-            latitude = null,
-            longitude = null,
-            summaryPolyLine = null,
-            formattedPace = null, // Will include units
-            activityId = null;
-
-        if (Array.isArray(data) && data.length > 0) {
-            this.sendSocketNotification("LOG", `Processing activity data. Count: ${data.length}`);
-            const activity = data[0];
-
-            activityId = activity.id || null;
-            name = activity.name;
-            const date = new Date(activity.start_date);
-            const month = String(date.getUTCMonth() + 1).padStart(2, "0");
-            const day = String(date.getUTCDate()).padStart(2, "0");
-            const year = date.getUTCFullYear();
-            activityDate = `${month}/${day}/${year}`;
-
-            // --- Conditional Distance Calculation ---
-            let distanceInMeters = 0;
-            if (typeof activity.distance === 'number') {
-                distanceInMeters = activity.distance;
-                if (unitsConfig === "imperial") {
-                    distance = (distanceInMeters * 0.000621371).toFixed(1); // Miles
-                    distanceUnits = "mi"; // Ensure units label is correct
-                } else {
-                    distance = (distanceInMeters / 1000).toFixed(1); // Kilometers
-                    distanceUnits = "km"; // Ensure units label is correct
-                }
-            } else {
-                this.sendSocketNotification("LOG", `Notice: Activity '${activity.name}' lacks distance data.`);
-                distanceUnits = ""; // No units if no distance
-            }
-            // --- End Distance Calculation ---
-
-            // Time Calculation
-            let movingTimeInSeconds = 0;
-            if (typeof activity.moving_time === 'number') {
-                movingTimeInSeconds = activity.moving_time;
-                const totalMinutes = Math.floor(movingTimeInSeconds / 60);
-                minutes = totalMinutes % 60;
-                hours = Math.floor(totalMinutes / 60);
-            } else {
-                this.sendSocketNotification("LOG", `Notice: Activity '${activity.name}' lacks moving time data.`);
-            }
-
-            // --- Conditional Pace Calculation ---
-			// Optrional parameter to only show pace for certain activities
-            //const isPaceRelevant = ['Run', 'Walk', 'Hike', 'Trail Run', 'Ride', 'Virtual Run'].includes(activity.type); 
-            if (/*isPaceRelevant &&*/ distanceInMeters > 0 && movingTimeInSeconds > 0) {
-                let paceInSecondsPerUnit = 0;
-
-                if (unitsConfig === "imperial") {
-                    const distanceInMiles = distanceInMeters * 0.000621371;
-                    paceInSecondsPerUnit = movingTimeInSeconds / distanceInMiles;
-                } else {
-                    const distanceInKm = distanceInMeters / 1000;
-                    paceInSecondsPerUnit = movingTimeInSeconds / distanceInKm;
-                }
-                const paceMinutes = Math.floor(paceInSecondsPerUnit / 60);
-                const paceSeconds = Math.round(paceInSecondsPerUnit % 60);
-                const formattedSeconds = String(paceSeconds).padStart(2, '0');
-                formattedPace = `${paceMinutes}:${formattedSeconds}`;
-            } else if (distanceInMeters <= 0 || movingTimeInSeconds <= 0) {
-                this.sendSocketNotification("LOG", "Could not calculate pace due to zero distance or time.");
-            } else {
-                this.sendSocketNotification("LOG", `Pace calculation not relevant for activity type: ${activity.type}`);
-            }
-            // --- End Pace Calculation ---
-
-            // Map Data Handling (Simplified with optional chaining)
-            latitude = activity.start_latlng?.[0] ?? null;
-            longitude = activity.start_latlng?.[1] ?? null;
-            summaryPolyLine = activity.map?.summary_polyline ?? null;
-
-            this.sendSocketNotification("LOG", `Processed ID: ${activityId}, Distance: ${distance} ${distanceUnits}, Pace: ${formattedPace}, Lat: ${latitude}, Lng: ${longitude}, Polyline Exists: ${!!summaryPolyLine}`);
-
-        } else {
-            this.sendSocketNotification("LOG", "Warning: Received empty data array from Strava API.");
+    // --- Initialize or Update Instance Data ---
+    initInstance(identifier, config) {
+        if (!this.instances[identifier]) {
+            const tokenFilename = config.tokenFilename || `strava_access_token_${identifier}.json`;
+            const tokenFilePath = path.resolve(__dirname, tokenFilename);
+            this.instances[identifier] = {
+                config: config, tokenFilePath: tokenFilePath,
+                accessToken: null, refreshToken: config.stravaRefreshToken || null, expiresAt: null
+            };
+            this.log(`Initialized instance ${identifier} with token file ${tokenFilePath}`);
+        } else { // Update config on restart
+            this.instances[identifier].config = config;
+            this.instances[identifier].refreshToken = config.stravaRefreshToken || this.instances[identifier].refreshToken;
+            this.instances[identifier].tokenFilePath = path.resolve(__dirname, config.tokenFilename || path.basename(this.instances[identifier].tokenFilePath));
+            // this.log(`Refreshed config for instance ${identifier}`); // Optional log
         }
+    },
 
-        // Return the processed data object
-        return {
-            id: activityId,
-            name,
-            activityDate,
-            distance,       // Formatted distance number string
-            distanceUnits,  // "km" or "mi"
-            minutes,
-            hours,
-            latitude,
-            longitude,
-            summaryPolyLine,
-            formattedPace   // Formatted pace string with units or null
-        };
-    }, // End of processData
+    // --- Socket Notification Handler ---
+	socketNotificationReceived (notification, payload) {
+        if (!payload || !payload.identifier || !payload.config) {
+             this.log(`Received notification "${notification}" without identifier/config. Ignoring.`, "warn");
+             return;
+        }
+        const identifier = payload.identifier;
+        this.initInstance(identifier, payload.config); // Ensure instance exists
 
-    // --- Updated getStravaData ---
-    async getStravaData (payload) { // Receives full payload from frontend
-        const filePath = path.join(__dirname, "..", "strava_access_token.json");
-        // Extract units from payload, default to metric if not provided
-        const units = payload.units || "metric";
+		if (notification === "GET_STRAVA_DATA") {
+            // this.log(`Received ${notification} request for instance ${identifier}`); // Optional log
+			this.getStravaData(identifier);
+		} else {
+            this.log(`Received unhandled notification: ${notification} for ${identifier}`, "warn");
+        }
+	},
+
+    // --- Fetch Strava Data Orchestration ---
+    async getStravaData (identifier) {
+        const instance = this.instances[identifier];
+        if (!instance) {
+             this.log(`Instance ${identifier} not found in getStravaData.`, "error");
+             this.sendSocketNotification("STRAVA_FETCH_ERROR", { identifier: identifier, error: "Node helper instance not found." });
+             return;
+        }
+        // this.log(`Getting Strava data for ${identifier}.`); // Optional log
 
         try {
-            let justRefreshedToken = false;
-            let localAccessTokenData;
-
-            if (fs.existsSync(filePath)) {
-                try {
-                    const localFileData = await fs.promises.readFile(filePath);
-                    localAccessTokenData = JSON.parse(localFileData);
-                    if (localAccessTokenData?.access_token && localAccessTokenData.expires_at > Math.floor(Date.now() / 1000)) {
-                        this.accessTokenData = localAccessTokenData;
-                        this.sendSocketNotification("LOG", "Using existing valid token from file.");
-                    } else {
-                        this.sendSocketNotification("LOG", "Local token expired or invalid, refreshing...");
-                        const refreshToken = localAccessTokenData?.refresh_token || payload.refreshToken;
-                        if (!refreshToken) throw new Error("No refresh token available.");
-                        await this.getAccessToken({...payload, refreshToken: refreshToken });
-                        justRefreshedToken = true;
-                    }
-                } catch (fileError) {
-                    this.sendSocketNotification("LOG", `Error reading/parsing token file: ${fileError}. Fetching new token.`);
-                    await this.getAccessToken(payload); // Use initial refresh token from payload
-                    justRefreshedToken = true;
-                }
-            } else {
-                this.sendSocketNotification("LOG", "Token file not found, fetching initial token.");
-                await this.getAccessToken(payload); // Use initial refresh token from payload
-                justRefreshedToken = true;
+            const accessToken = await this.getValidAccessToken(identifier);
+            if (!accessToken) {
+                this.log(`Failed to obtain valid access token for ${identifier}. Cannot fetch activities.`, "error");
+                return; // Error/Auth message already sent
             }
 
-            if (justRefreshedToken) {
-                this.sendSocketNotification("LOG", "Token refreshed/obtained. Waiting before data fetch...");
-                await new Promise(resolve => setTimeout(resolve, 5000));
-                this.sendSocketNotification("LOG", "Proceeding after delay.");
-            }
+            const config = instance.config;
+            const lookBackDays = config.lookBackDays || 30;
+            const lookAheadDays = config.lookAheadDays || 1;
+            const nowSeconds = Math.floor(Date.now() / 1000);
+            const afterTimestamp = nowSeconds - (lookBackDays * 24 * 60 * 60);
+            const beforeTimestamp = nowSeconds + (lookAheadDays * 24 * 60 * 60);
+            const activitiesUrl = `https://www.strava.com/api/v3/athlete/activities?before=${beforeTimestamp}&after=${afterTimestamp}&page=1&per_page=1`;
 
-            if (!this.accessTokenData?.access_token) {
-                 throw new Error("Failed to obtain a valid access token.");
-            }
-
-            const beforeTimestamp = payload.before || Math.floor(Date.now() / 1000);
-            const afterTimestamp = payload.after || Math.floor((Date.now() - 30 * 24 * 60 * 60 * 1000) / 1000);
-            const activitiesUrl = `${payload.url}athlete/activities?before=${beforeTimestamp}&after=${afterTimestamp}&per_page=1`;
-
-            this.sendSocketNotification("LOG", `Fetching Strava activities from: ${activitiesUrl}`);
+            // this.log(`Fetching Strava activities for ${identifier} from: ${activitiesUrl}`); // Optional log
             const response = await axios.get(activitiesUrl, {
-                headers: { Authorization: `Bearer ${this.accessTokenData.access_token}` }
+                headers: { Authorization: `Bearer ${accessToken}` }
             });
 
-            this.sendSocketNotification("LOG", `Raw Strava API Response Data:\n${JSON.stringify(response.data, null, 2)}`);
-
-            // --- Pass units to processData ---
-            const processedData = this.processData(response.data, units);
-            this.sendSocketNotification("STRAVA_DATA_RESULT", processedData);
-
-        } catch (error) {
-            if (error.response?.status === 401) {
-                this.sendSocketNotification("LOG", "Access token invalid (401), attempting refresh...");
-                try {
-                    let refreshTokenToUse = payload.refreshToken; // Default to config/initial
-                    if (fs.existsSync(filePath)) { // Try to get latest from file
-                        try {
-                            const fileData = JSON.parse(await fs.promises.readFile(filePath));
-                            if (fileData?.refresh_token) refreshTokenToUse = fileData.refresh_token;
-                        } catch (readError) { /* Ignore error reading file during recovery */ }
-                    }
-                    if (!refreshTokenToUse) throw new Error("No refresh token available for 401 recovery.");
-                    await this.getAccessToken({...payload, refreshToken: refreshTokenToUse }); // Refresh
-                    this.sendSocketNotification("LOG", "Token refreshed after 401. Waiting before retry...");
-                    await new Promise(resolve => setTimeout(resolve, 5000));
-                    this.sendSocketNotification("LOG", "Retrying getStravaData after 401 delay.");
-                    this.getStravaData(payload); // <<<< Pass original payload in recursive call
-                } catch (tokenError) {
-                     this.sendSocketNotification("LOG", `Failed to refresh token after 401: ${tokenError}`);
-                     this.sendSocketNotification("ACCESS_TOKEN_ERROR", `Failed 401 recovery: ${tokenError.message || tokenError}`);
-                }
-            } else if (error.response?.status === 429) {
-                this.sendSocketNotification("LOG",`Strava API rate limit (429). Error: ${error}`);
-                this.sendSocketNotification("STRAVA_FETCH_ERROR", "Rate limit hit (429).");
+            if (response.data && Array.isArray(response.data)) {
+                 if (response.data.length > 0) {
+                    const processedData = this.processData(response.data[0], config);
+                    // this.log(`Successfully processed activity ID ${processedData.id} for ${identifier}`); // Optional log
+                    // Log only essential data being sent:
+                    // this.log(`Sending data for ${identifier}: ID ${processedData.id}, Polyline: ${!!processedData.polyline}, Lat: ${processedData.latitude}`);
+                    this.sendSocketNotification("STRAVA_DATA_RESULT", { identifier: identifier, data: processedData });
+                 } else {
+                    this.log(`No activities found within the time range for ${identifier}.`);
+                    this.sendSocketNotification("STRAVA_DATA_RESULT", { identifier: identifier, data: null });
+                 }
             } else {
-               this.sendSocketNotification("LOG", `Error fetching/processing Strava data: ${error}`);
-               this.sendSocketNotification("STRAVA_FETCH_ERROR", `API/Processing Error: ${error.message || error}`);
+                 this.log(`Unexpected Strava API response format for ${identifier}.`, "warn");
+                 throw new Error("Unexpected response format from Strava API.");
             }
+        } catch (error) {
+            this.log(`Error during getStravaData for ${identifier}: ${error.message}`, "error");
+            let errorMessage = error.message || "Unknown error";
+            let isAuthError = false;
+            if (error.response) {
+                 errorMessage = `API Error (${error.response.status}): ${error.response.data?.message || error.message}`;
+                 if (error.response.status === 401) {
+                     isAuthError = true; errorMessage = "Invalid credentials (401). Token may be revoked or expired.";
+                     if (instance) { instance.accessToken = null; instance.expiresAt = null; } // Clear bad token
+                     this.sendSocketNotification("ACCESS_TOKEN_ERROR", { identifier: identifier, error: errorMessage });
+                 } else if (error.response.status === 429) {
+                      errorMessage = "Strava API rate limit exceeded (429).";
+                      this.sendSocketNotification("STRAVA_FETCH_ERROR", { identifier: identifier, error: errorMessage });
+                 } else { this.sendSocketNotification("STRAVA_FETCH_ERROR", { identifier: identifier, error: errorMessage }); }
+            } else { this.sendSocketNotification("STRAVA_FETCH_ERROR", { identifier: identifier, error: errorMessage }); }
         }
     }, // End of getStravaData
 
-    // --- Updated socketNotificationReceived ---
-	socketNotificationReceived (notification, payload) {
-		if (notification === "GET_STRAVA_DATA") {
-            // Pass the entire payload received from the frontend
-			this.getStravaData(payload);
+    // --- Get Valid Access Token ---
+    async getValidAccessToken(identifier) {
+        const instance = this.instances[identifier];
+        if (!instance) return null;
+        const nowSeconds = Math.floor(Date.now() / 1000);
+        const buffer = 300; // 5 minute buffer
+
+        // 1. Check memory token
+        if (instance.accessToken && instance.expiresAt && nowSeconds < (instance.expiresAt - buffer)) {
+            // this.log(`Using valid token from memory for ${identifier}.`); // Optional log
+            return instance.accessToken;
+        }
+
+        // 2. Try loading from file if needed
+        if (!instance.accessToken || !instance.expiresAt) { // Load only if not in memory
+            // this.log(`No token in memory for ${identifier}. Loading from file: ${instance.tokenFilePath}`); // Optional log
+            if (fs.existsSync(instance.tokenFilePath)) {
+                try {
+                    const fileData = JSON.parse(fs.readFileSync(instance.tokenFilePath));
+                    if (fileData.access_token && fileData.refresh_token && fileData.expires_at) {
+                         instance.accessToken = fileData.access_token;
+                         instance.refreshToken = fileData.refresh_token;
+                         instance.expiresAt = fileData.expires_at;
+                         // Re-check expiration after loading
+                         if (nowSeconds < (instance.expiresAt - buffer)) {
+                             this.log(`Token loaded from file is valid for ${identifier}.`);
+                             return instance.accessToken;
+                         } else {
+                              this.log(`Token loaded from file is expired for ${identifier}.`);
+                         }
+                    } else { this.log(`Token file for ${identifier} missing required fields.`, "warn"); }
+                } catch (err) { this.log(`Error reading/parsing token file ${instance.tokenFilePath} for ${identifier}: ${err}`, "error"); }
+            } else { /* this.log(`Token file not found for ${identifier}.`); */ } // Optional log
+        }
+
+        // 3. If still no valid token (memory/file expired or missing), refresh
+        this.log(`Attempting token refresh for ${identifier}.`);
+        const refreshedTokenData = await this.refreshAccessToken(identifier);
+        return refreshedTokenData ? refreshedTokenData.access_token : null;
+    },
+
+    // --- Refresh Access Token ---
+	async refreshAccessToken (identifier) {
+        const instance = this.instances[identifier];
+        if (!instance) { this.log(`refreshAccessToken: Instance ${identifier} not found.`, "error"); return null; }
+		const config = instance.config;
+        if (!config.stravaClientId || !config.stravaClientSecret) {
+             this.log(`Cannot refresh token for ${identifier}: Client ID/Secret missing.`, "error");
+             this.sendSocketNotification("ACCESS_TOKEN_ERROR", { identifier: identifier, error: "Client ID/Secret missing" }); return null;
+        }
+         if (!instance.refreshToken) {
+             this.log(`Cannot refresh token for ${identifier}: No refresh token available.`, "error");
+             this.sendSocketNotification("ACCESS_TOKEN_ERROR", { identifier: identifier, error: "Refresh token missing" }); return null;
+         }
+
+		try {
+             const url = `https://www.strava.com/oauth/token`;
+             // this.log(`Attempting token refresh for ${identifier}...`); // Optional log
+			 const response = await axios.post(url, null, { params: {
+                     client_id: config.stravaClientId, client_secret: config.stravaClientSecret,
+                     refresh_token: instance.refreshToken, grant_type: "refresh_token"
+                 }});
+             if (!response.data?.access_token || !response.data?.refresh_token || !response.data?.expires_at) {
+                 throw new Error("Incomplete token data received from Strava.");
+             }
+             const newTokenData = response.data;
+			 this.log(`Token refresh successful for ${identifier}.`); // Keep success log
+             instance.accessToken = newTokenData.access_token;
+             instance.refreshToken = newTokenData.refresh_token;
+             instance.expiresAt = newTokenData.expires_at;
+             this.saveTokensToFile(identifier, newTokenData);
+             return newTokenData;
+		} catch (error) {
+             this.log(`Error refreshing access token for ${identifier}: ${error.message}`, "error");
+             if (instance) { instance.accessToken = null; instance.expiresAt = null; } // Clear state
+             let errorMessage = error.message || "Failed to refresh token";
+             if (error.response) {
+                 errorMessage = `Token Refresh Error (${error.response.status}): ${error.response.data?.message || error.message}`;
+                 if (error.response.status === 400 || error.response.status === 401) {
+                     errorMessage = "Invalid refresh token (400/401). Re-authentication may be required.";
+                     this.sendSocketNotification("ACCESS_TOKEN_ERROR", { identifier: identifier, error: errorMessage });
+                 } else { this.sendSocketNotification("ACCESS_TOKEN_ERROR", { identifier: identifier, error: errorMessage }); }
+             } else { this.sendSocketNotification("ACCESS_TOKEN_ERROR", { identifier: identifier, error: errorMessage }); }
+             return null;
 		}
-	}
+	}, // End of refreshAccessToken
+
+    // --- Save Tokens to File ---
+    saveTokensToFile(identifier, tokenData) {
+        const instance = this.instances[identifier];
+        if (!instance || !instance.tokenFilePath) { this.log(`Cannot save tokens: Instance ${identifier} missing.`, "warn"); return; }
+        if (!tokenData?.access_token || !tokenData?.refresh_token || !tokenData?.expires_at) {
+            this.log(`Attempted to save invalid tokens for ${identifier}. Aborting.`, "warn"); return;
+        }
+        try {
+            fs.writeFileSync(instance.tokenFilePath, JSON.stringify(tokenData, null, 2));
+            this.log(`Tokens saved successfully to ${path.basename(instance.tokenFilePath)} for ${identifier}.`); // Keep success log
+        } catch (error) { this.log(`Error writing token file ${instance.tokenFilePath} for ${identifier}: ${error}`, "error"); }
+    },
+
+    // --- Process Activity Data ---
+    processData (activity, config) { // Process a SINGLE activity object
+        const unitsConfig = config.units || "metric";
+        let name = null, 
+        activityDate = null, 
+        distance = null, 
+        distanceUnits = "", 
+        minutes = null, 
+        hours = null,
+        latitude = null, 
+        longitude = null, 
+        polyline = null, 
+        formattedPace = null, 
+        activityId = null, 
+        formattedTime = null;
+
+        if (!activity || typeof activity !== 'object') return {}; // Return empty for invalid input
+
+        // this.log(`Processing activity: ${activity.name || 'Unnamed'} (ID: ${activity.id})`); // Optional log
+
+        activityId = activity.id || null;
+        name = activity.name || "Unnamed Activity";
+        activityDate = activity.start_date_local || activity.start_date || null;
+
+        // Distance
+        let distanceInMeters = 0;
+        if (typeof activity.distance === 'number') {
+            distanceInMeters = activity.distance;
+            if (unitsConfig === "imperial") {
+                distance = (distanceInMeters * 0.000621371).toFixed(1); distanceUnits = "mi";
+            } else { distance = (distanceInMeters / 1000).toFixed(1); distanceUnits = "km"; }
+        }
+
+        // Time
+        let movingTimeInSeconds = 0;
+        if (typeof activity.moving_time === 'number') {
+            movingTimeInSeconds = activity.moving_time;
+            const totalMinutes = Math.floor(movingTimeInSeconds / 60);
+            minutes = totalMinutes % 60; 
+            hours = Math.floor(totalMinutes / 60);
+            if (hours > 0) { formattedTime = `${hours}h ${minutes}m`; }
+            else if (minutes > 0) { formattedTime = `${minutes}m`; }
+            else if (movingTimeInSeconds > 0) { formattedTime = `${movingTimeInSeconds}s`; }
+        }
+
+        // Pace
+        if (distanceInMeters > 0 && movingTimeInSeconds > 0) {
+            let paceMinPerUnit = (unitsConfig === "imperial")
+                ? (movingTimeInSeconds / 60) / (distanceInMeters * 0.000621371)
+                : (movingTimeInSeconds / 60) / (distanceInMeters / 1000);
+            const paceMinutes = Math.floor(paceMinPerUnit);
+            const paceSeconds = Math.round((paceMinPerUnit - paceMinutes) * 60);
+            formattedPace = `${paceMinutes}:${String(paceSeconds).padStart(2, '0')}`;
+        }
+
+        // Map Data
+        latitude = activity.start_latlng?.[0] ?? null;
+        longitude = activity.start_latlng?.[1] ?? null;
+        polyline = activity.map?.summary_polyline ?? null;
+
+        return {
+            id: activityId, 
+            name: name, 
+            activityDate: activityDate,
+            distance: distance, 
+            distanceUnits: distanceUnits,
+            minutes: minutes,
+            hours: hours,
+            formattedTime: formattedTime, // Use formatted time
+            latitude: latitude, 
+            longitude: longitude,
+            polyline: polyline,
+            formattedPace: formattedPace,
+        };
+    }, // End of processData
+
+    // --- Logging Helper ---
+    log: function(message, type = "log") {
+        const prefix = `MMM-Strava-LAM NodeHelper:`; // Simpler prefix
+        switch(type) {
+            case "error": console.error(`${prefix} ERROR: ${message}`); break;
+            case "warn": console.warn(`${prefix} WARN: ${message}`); break;
+            // Keep info logs minimal or remove if not needed
+            // case "info": console.info(`${prefix} INFO: ${message}`); break;
+            default: console.log(`${prefix} ${message}`);
+        }
+    }
+
 }); // End of module.exports
